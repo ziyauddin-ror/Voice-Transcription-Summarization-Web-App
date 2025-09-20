@@ -1,0 +1,221 @@
+<h1>🎤 Live Transcription</h1>
+<div class="note" id="summary-note">
+  📝 Note: Please speak more than 50 words to generate a proper summary.
+</div>
+
+<div class="controls">
+  <button id="start">▶️ Start Listening</button>
+  <button id="stop" disabled>⏹️ Stop Listening</button>
+  <button id="copy" disabled>📋 Copy Transcript</button>
+</div>
+
+<!-- Live status above transcript -->
+<div id="live-status" class="live-status">🛑 Not connected</div>
+
+<!-- All cards in one row -->
+<div class="cards-wrapper">
+  <div class="card-container">
+    <h3>Live Transcript:</h3>
+    <div id="transcript" class="transcript"></div>
+  </div>
+
+  <div class="card-container">
+    <h3>Final Transcript:</h3>
+    <div id="finalTranscript" class="finalTranscript"></div>
+  </div>
+
+  <div class="card-container">
+    <h3>Summary:</h3>
+    <div id="summary" class="summary"></div>
+  </div>
+</div>
+
+<style>
+  body {
+    font-family: sans-serif;
+    margin: 20px;
+  }
+
+  .live-status {
+    margin: 10px 0;
+    font-weight: bold;
+    color: green;
+  }
+
+  /* Flex row for cards */
+  .cards-wrapper {
+    display: flex;
+    gap: 16px;
+    margin-top: 15px;
+    flex-wrap: wrap; /* allows wrap on small screens */
+  }
+
+  /* Card styling */
+  .card-container {
+    flex: 1 1 300px;
+    min-height: 200px;
+    max-height: 40vh;
+    border: 1px solid #ccc;
+    border-radius: 10px;
+    padding: 12px;
+    background: #fafafa;
+    overflow-y: auto;
+    box-sizing: border-box;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
+  }
+
+  .card-container h3 {
+    margin-top: 0;
+    font-size: 1rem;
+    color: #333;
+  }
+
+  .transcript-line {
+    margin: 2px 0;
+  }
+
+  .speaker-0 { color: #0077cc; }
+  .speaker-1 { color: #cc3300; }
+  .speaker-2 { color: #228b22; }
+
+  .timestamp {
+    color: #999;
+    font-size: 0.8em;
+    margin-right: 6px;
+  }
+
+  .finalTranscript, .summary {
+    white-space: pre-wrap;
+  }
+
+  button {
+    margin: 4px;
+    padding: 8px 12px;
+    border-radius: 6px;
+    border: none;
+    cursor: pointer;
+  }
+
+  button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+</style>
+
+<script>
+let ws, mediaRecorder, audioChunks = [];
+let transcriptEl = document.getElementById("transcript");
+let finalTranscriptEl = document.getElementById("finalTranscript");
+let summaryEl = document.getElementById("summary");
+let liveStatusEl = document.getElementById("live-status");
+let copyBtn = document.getElementById("copy");
+let liveSegmentEl = null;
+let allSegments = [];
+
+// Append final line
+function appendLine(speaker, text, timestamp) {
+  const line = document.createElement("div");
+  line.className = `transcript-line speaker-${speaker}`;
+  line.innerHTML = `<span class="timestamp">[${timestamp}s]</span> <strong>Speaker ${speaker}:</strong> ${text}`;
+  transcriptEl.appendChild(line);
+  transcriptEl.scrollTop = transcriptEl.scrollHeight;
+}
+
+// Show live transcript
+function showLive(text) {
+  if (!liveSegmentEl) {
+    liveSegmentEl = document.createElement("div");
+    liveSegmentEl.className = "transcript-line live";
+    transcriptEl.appendChild(liveSegmentEl);
+  }
+  liveSegmentEl.textContent = text;
+  transcriptEl.scrollTop = transcriptEl.scrollHeight;
+}
+
+// Start recording
+document.getElementById("start").onclick = async () => {
+  transcriptEl.innerHTML = "";
+  finalTranscriptEl.textContent = "";
+  summaryEl.textContent = "";
+  allSegments = [];
+  audioChunks = [];
+  liveSegmentEl = null;
+
+  ws = new WebSocket(
+    "wss://api.deepgram.com/v1/listen?punctuate=true&model=nova-3&interim_results=true&diarize=true",
+    ["token", "<%= ENV['DEEPGRAM_API_KEY'] %>"]
+  );
+
+  ws.onopen = async () => {
+    document.getElementById("start").disabled = true;
+    document.getElementById("stop").disabled = false;
+    liveStatusEl.textContent = "✅ Live transcript started. You can speak now.";
+    
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm", audioBitsPerSecond: 64000 });
+
+    mediaRecorder.ondataavailable = e => {
+      if (e.data.size > 0) {
+        audioChunks.push(e.data);
+        if (ws.readyState === WebSocket.OPEN) ws.send(e.data);
+      }
+    };
+
+    mediaRecorder.start(100);
+  };
+
+  ws.onmessage = (msg) => {
+    const data = JSON.parse(msg.data);
+    if (data.type === "Results") {
+      const alt = data.channel.alternatives[0];
+      if (!alt.transcript) return;
+
+      if (!data.is_final) {
+        showLive(alt.transcript);  // Show interim transcript
+      } else {
+        if (liveSegmentEl) {
+          transcriptEl.removeChild(liveSegmentEl);
+          liveSegmentEl = null;
+        }
+        const speaker = alt.words[0]?.speaker || 0;
+        const timestamp = alt.words[0]?.start?.toFixed(1) || "0.0";
+        const segment = { speaker, text: alt.transcript, timestamp };
+        allSegments.push(segment);
+        appendLine(speaker, alt.transcript, timestamp);
+      }
+    }
+  };
+};
+
+let finalText = "";
+
+// Stop recording
+document.getElementById("stop").onclick = async () => {
+  mediaRecorder.stop();
+  ws.close();
+  document.getElementById("start").disabled = false;
+  document.getElementById("stop").disabled = true;
+  copyBtn.disabled = false;
+
+  const audioBlob = new Blob(audioChunks, { type: "audio/webm" });
+  const formData = new FormData();
+  formData.append("audio", audioBlob, "recording.webm");
+
+  const resp = await fetch("/transcriptions", { method: "POST", body: formData });
+  const json = await resp.json();
+
+  finalTranscriptEl.textContent = json.transcription; 
+  summaryEl.textContent = json.summary;
+  finalText = json.transcription;
+};
+
+// Copy final transcript
+copyBtn.onclick = () => {
+  if (!finalText) {
+    alert("No transcript available to copy.");
+    return;
+  }
+  navigator.clipboard.writeText(finalText);
+  alert("Final transcript copied!");
+};
+</script>
